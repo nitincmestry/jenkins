@@ -23,10 +23,30 @@ FROM jenkins/agent:latest
 USER root
 
 # Install Python, pip, virtualenv, and SSH
-RUN apt-get update && \
-    apt-get install -y python3 python3-pip openssh-client && \
-    python3 -m pip install --upgrade pip virtualenv && \
-    mkdir -p /home/jenkins/.ssh && \
+FROM ubuntu:22.04
+
+# Install Jenkins agent dependencies
+RUN apt-get update && apt-get install -y \
+    openjdk-11-jdk \
+    curl \
+    git \
+    python3 \
+    python3-venv \
+    openssh-client \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create a virtual environment and upgrade pip
+RUN python3 -m venv /opt/venv && \
+    /opt/venv/bin/python3 -m pip install --upgrade pip virtualenv
+
+# Add the virtual environment to PATH
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Create Jenkins user
+RUN useradd -m -d /home/jenkins -s /bin/bash jenkins
+
+# Set up SSH for Jenkins user
+RUN mkdir -p /home/jenkins/.ssh && \
     chown jenkins:jenkins /home/jenkins/.ssh && \
     chmod 700 /home/jenkins/.ssh
 
@@ -42,14 +62,17 @@ ENTRYPOINT ["/entrypoint.sh"]
 Create an `entrypoint.sh` script to generate SSH keys (if missing):
 
 ```bash
-#!/bin/sh
+#!/bin/bash
 set -e
 
-# Generate SSH key pair if it doesn't exist
-if [ ! -f ~/.ssh/id_ed25519 ]; then
-  echo "Generating SSH key pair..."
-  ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519 -N "" -q
+# Generate SSH keys if they don't exist
+if [ ! -f /home/jenkins/.ssh/id_rsa ]; then
+    ssh-keygen -t rsa -b 4096 -f /home/jenkins/.ssh/id_rsa -N ""
 fi
+
+# Start the SSH agent and add the private key
+eval $(ssh-agent -s)
+ssh-add /home/jenkins/.ssh/id_rsa
 
 # Execute the command passed to the container
 exec "$@"
