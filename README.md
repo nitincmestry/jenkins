@@ -1,56 +1,91 @@
-# Jenkins on Podman with Python Build Support and GitHub SSH Integration
+# Jenkins with Custom Agent on Podman (macOS)
 
-This guide explains how to set up Jenkins on Podman with a custom Python-enabled agent and SSH key integration for GitHub.
+## Table of Contents
+1. [Prerequisites](#prerequisites)
+2. [Pod Creation](#1-pod-creation)
+3. [Jenkins Setup](#2-jenkins-setup)
+4. [Custom Agent Setup](#3-custom-agent-setup)
+5. [Network Configuration](#4-network-configuration)
+6. [Verification](#5-verification)
+7. [Maintenance](#6-maintenance)
+8. [Troubleshooting](#7-troubleshooting)
 
 ---
 
 ## Prerequisites
-
-- **Podman**: Installed and configured on your system.
-- **Python**: Required for builds (installed in the agent image).
-- **GitHub Account**: To add the SSH key for repository access.
+- Podman installed on macOS
+- Minimum 4GB RAM allocated to Podman VM
+- Git account with SSH key access
+- Basic terminal familiarity
 
 ---
 
-## Steps
+## 1. Pod Creation
 
-### 1. Create a Custom Jenkins Agent Image with Python and SSH
+### Create Shared Pod
+```bash
+podman pod create \
+  --name jenkins-pod \
+  --publish 8080:8080 \
+  --publish 50000:50000 \
+  --network bridge
+```
 
-Create a `Dockerfile` for the agent:
+**Verify:**
+```bash
+podman pod ps
+```
 
+---
+
+## 2. Jenkins Setup
+
+### Start Jenkins Container
+```bash
+podman run -d \
+  --pod jenkins-pod \
+  --name jenkins \
+  -v jenkins_home:/var/jenkins_home \
+  --security-opt label=disable \
+  docker.io/jenkins/jenkins:lts
+```
+
+### Get Initial Password
+```bash
+podman exec jenkins cat /var/jenkins_home/secrets/initialAdminPassword
+```
+
+**Access UI:** `http://localhost:8080`
+
+---
+
+## 3. Custom Agent Setup
+
+### 3.1 Create Agent Image
+
+**Dockerfile:**
 ```dockerfile
-FROM jenkins/agent:latest
+FROM jenkins/inbound-agent:latest
+
 USER root
 
-# Install Python, pip, virtualenv, and SSH
-FROM ubuntu:22.04
-
-# Install Jenkins agent dependencies
+# Install Tools
 RUN apt-get update && apt-get install -y \
-    openjdk-11-jdk \
-    curl \
-    git \
     python3 \
-    python3-venv \
+    git \
     openssh-client \
+    iputils-ping \
+    net-tools \
+    vim \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Create a virtual environment and upgrade pip
-RUN python3 -m venv /opt/venv && \
-    /opt/venv/bin/python3 -m pip install --upgrade pip virtualenv
-
-# Add the virtual environment to PATH
-ENV PATH="/opt/venv/bin:$PATH"
-
-# Create Jenkins user
-RUN useradd -m -d /home/jenkins -s /bin/bash jenkins
-
-# Set up SSH for Jenkins user
+# SSH Setup
 RUN mkdir -p /home/jenkins/.ssh && \
-    chown jenkins:jenkins /home/jenkins/.ssh && \
-    chmod 700 /home/jenkins/.ssh
+    chmod 700 /home/jenkins/.ssh && \
+    chown jenkins:jenkins /home/jenkins/.ssh
 
-# Copy entrypoint script to generate SSH keys
+# Entrypoint Script
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
@@ -59,138 +94,152 @@ USER jenkins
 ENTRYPOINT ["/entrypoint.sh"]
 ```
 
-Create an `entrypoint.sh` script to generate SSH keys (if missing):
-
+**entrypoint.sh:**
 ```bash
 #!/bin/bash
-set -e
 
-# Generate SSH keys if they don't exist
+# Generate SSH Key
 if [ ! -f /home/jenkins/.ssh/id_rsa ]; then
-    ssh-keygen -t rsa -b 4096 -f /home/jenkins/.ssh/id_rsa -N ""
+    ssh-keygen -t rsa -b 4096 -f /home/jenkins/.ssh/id_rsa -q -N ""
 fi
 
-# Start the SSH agent and add the private key
+# Fix Permissions
+chmod 700 /home/jenkins/.ssh
+chmod 600 /home/jenkins/.ssh/id_rsa
+chmod 644 /home/jenkins/.ssh/id_rsa.pub
+
+# Start SSH Agent
 eval $(ssh-agent -s)
 ssh-add /home/jenkins/.ssh/id_rsa
 
-# Execute the command passed to the container
-exec "$@"
+# Connect to Jenkins
+exec /usr/local/bin/jenkins-agent "$@"
 ```
 
-**Build the image:**
-
+### 3.2 Build Image
 ```bash
-podman build -t jenkins-python-agent .
+podman build -t custom-jenkins-agent .
 ```
 
 ---
 
-### 2. Start Jenkins Master in a Podman Pod
+## 4. Network Configuration
 
-Create a pod and run the Jenkins master:
-
+### Start Agent Container
 ```bash
-podman pod create --name jenkins-pod -p 8080:8080 -p 50000:50000
-
-podman run -d --pod jenkins-pod \
-  --name jenkins-master \
-  -v jenkins_home:/var/jenkins_home \
-  jenkins/jenkins:lts
+podman run -d \
+  --pod jenkins-pod \
+  --name jenkins-agent \
+  -v agent_ssh:/home/jenkins/.ssh \
+  --security-opt label=disable \
+  localhost/custom-jenkins-agent \
+  -url http://localhost:8080 \
+  -workDir /home/jenkins/agent \
+  -secret <YOUR_SECRET> \
+  -name python-agent
 ```
 
-Retrieve the initial admin password:
+**Get Secret:**
+1. Jenkins UI → **Manage Jenkins** → **Nodes**
+2. Click agent → **Secret**
 
+---
+
+## 5. Verification
+
+### Check Containers
 ```bash
-podman exec jenkins-master cat /var/jenkins_home/secrets/initialAdminPassword
+podman ps --pod
+
+# Expected output:
+# CONTAINER ID  IMAGE                               COMMAND
+# ...           jenkins/jenkins:lts                /usr/bin/tini -- ...
+# ...           localhost/custom-jenkins-agent     /entrypoint.sh ...
+```
+
+### Test Tools
+```bash
+podman exec jenkins-agent \
+  sh -c "git --version && python3 --version && ssh -T git@github.com"
+```
+
+### Verify Jenkins Node
+1. Access `http://localhost:8080/computer/python-agent/`
+2. Check for "Connected" status
+
+---
+
+## 6. Maintenance
+
+### Start/Stop Pod
+```bash
+podman pod stop jenkins-pod
+podman pod start jenkins-pod
+```
+
+### Backup Data
+```bash
+# Jenkins config
+podman volume export jenkins_home > jenkins_backup.tar
+
+# SSH keys
+podman volume export agent_ssh > ssh_backup.tar
+```
+
+### Update Containers
+```bash
+podman stop jenkins jenkins-agent
+podman pull docker.io/jenkins/jenkins:lts
+podman pull localhost/custom-jenkins-agent
+podman pod start jenkins-pod
 ```
 
 ---
 
-### 3. Configure Jenkins Agent Node
+## 7. Troubleshooting
 
-1. Access Jenkins at `http://localhost:8080` and complete setup.
-2. Create a new agent named `python-agent`:
-   - **Remote root directory**: `/home/jenkins/agent`.
-   - **Launch method**: `Launch agent via Java Web Start`.
-
----
-
-### 4. Start the Agent with SSH Key Persistence
-
-Run the agent with a volume to persist SSH keys:
-
-```bash
-podman run -d --pod jenkins-pod \
-  --name jenkins-python-agent \
-  -v jenkins_agent_ssh:/home/jenkins/.ssh \
-  jenkins-python-agent \
-  java -jar /usr/share/jenkins/agent.jar \
-  -jnlpUrl http://localhost:8080/manage/computer/python-agent/jenkins-agent.jnlp \
-  -secret <your-secret-here>
-```
-
----
-
-### 5. Add SSH Key to GitHub
-
-1. **Retrieve the public key** from the agent container:
-
-```bash
-podman exec jenkins-python-agent cat /home/jenkins/.ssh/id_ed25519.pub
-```
-
-2. **Add the key to GitHub**:
-   - Go to **GitHub Settings** > **SSH and GPG Keys** > **New SSH Key**.
-   - Paste the public key and save.
-
----
-
-### 6. Test SSH Connection to GitHub (Optional)
-
-Run a shell inside the agent container to verify SSH access:
-
-```bash
-podman exec -it jenkins-python-agent /bin/bash
-ssh -T git@github.com  # Should show "You've successfully authenticated!"
-```
-
----
-
-### 7. Configure Jenkins Job with SSH Access
-
-1. Create a Jenkins job (e.g., Freestyle project).
-2. Add a build step to clone a GitHub repository via SSH:
+### Common Issues
+1. **Agent Connection Failures:**
    ```bash
-   git clone git@github.com:your-username/your-repo.git
+   podman exec jenkins-agent curl -I http://localhost:8080
    ```
-3. Assign the job to the `python-agent`.
+
+2. **SSH Permission Errors:**
+   ```bash
+   podman exec jenkins-agent ls -l /home/jenkins/.ssh
+   ```
+
+3. **Missing Tools:**
+   ```bash
+   podman exec jenkins-agent which git python3 ssh
+   ```
+
+### Key Files
+| File | Purpose | Location |
+|------|---------|----------|
+| `entrypoint.sh` | Agent initialization | Agent container |
+| `jenkins_home` | Jenkins configuration | Host volume |
+| `agent_ssh` | SSH keys | Host volume |
 
 ---
 
-## Optional: Configure SSH for GitHub Host
-
-Add GitHub to the SSH `known_hosts` file to avoid prompts:
-
-```bash
-podman exec -it jenkins-python-agent /bin/bash
-ssh-keyscan github.com >> ~/.ssh/known_hosts
+## Architecture Diagram
+``` 
++-----------------------+
+|     Jenkins Pod       |
++-----------------------+
+|  Jenkins Master       |
+|  - Port 8080          |
+|  - Volume: jenkins_home|
++-----------------------+
+|  Custom Agent         |
+|  - Python/Git/SSH     |
+|  - Volume: agent_ssh  |
++-----------------------+
 ```
 
----
-
-## Notes
-
-- **SSH Key Persistence**: The `-v jenkins_agent_ssh:/home/jenkins/.ssh` volume ensures keys survive container restarts.
-- **Security**: Never share the private key (`id_ed25519`). The agent runs as a non-root user (`jenkins`).
-- **GitHub Permissions**: Ensure the SSH key has read/write access to your repositories.
+[Download Complete Code Samples](https://your-docs-site.com/jenkins-podman-setup)
 
 ---
 
-## License
-
-This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
-
----
-
-This `README.md` includes SSH key generation and GitHub integration. Adjust repository URLs and permissions as needed!
+This document provides a complete reference for your Jenkins setup. Let me know if you need any section expanded or additional details!
