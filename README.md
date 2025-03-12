@@ -121,6 +121,11 @@ exec /usr/local/bin/jenkins-agent "$@"
 podman build -t custom-jenkins-agent .
 ```
 
+### 3.3 Push Image to Dockerhub or your private registry.
+```bash
+podman push -t custom-jenkins-agent docker.io/nitincmestry/custom-jenkins-agent:latest.
+```
+
 ---
 
 ## 4. Network Configuration
@@ -132,7 +137,7 @@ podman run -d \
   --name jenkins-agent \
   -v agent_ssh:/home/jenkins/.ssh \
   --security-opt label=disable \
-  localhost/custom-jenkins-agent \
+  nitincmestry/custom-jenkins-agent \
   -url http://localhost:8080 \
   -workDir /home/jenkins/agent \
   -secret <YOUR_SECRET> \
