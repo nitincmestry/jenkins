@@ -246,7 +246,7 @@ podman pod start jenkins-pod
 +-----------------------+
 ```
 
-[Download Complete Code Samples](https://your-docs-site.com/jenkins-podman-setup)
+[Download Complete Code Samples]([https://your-docs-site.com/jenkins-podman-setup](https://github.com/nitincmestry/jenkins/archive/refs/heads/main.zip))
 
 ---
 
